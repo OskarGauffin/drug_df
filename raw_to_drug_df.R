@@ -173,6 +173,11 @@ m1crpc_df_s <- split(m1crpc_df, factor(m1crpc_df$lpnr))
 # For debugging
 # ind <- split(m1crpc_df, factor(m1crpc_df$lpnr!=lpnr))[[1]]
 
+# Marcus comment
+# lpnr 556333, 427294
+# for(i in 1:length(m1crpc_df_s)){if(any(m1crpc_df_s[[i]]$lpnr %in% "788801") ) break}
+# bogus <- c(459055,165746,580226,16842,264227,88704,911162,556333,427294)
+
 line_df <- ldply(m1crpc_df_s, .progress = "text", .id=NULL, function(ind){
   
   # tryCatch stores the error messages, and makes ldply run through all records.
@@ -296,7 +301,7 @@ line_df <- ldply(m1crpc_df_s, .progress = "text", .id=NULL, function(ind){
         (dst_met_ind$first_gnrh[1]  < ind_doc_line1 | all(is.na(dst_met_ind$first_gnrh))) |
         
         # or if docetaxel is initiated before gnrh - then it's certainly not crpc.
-        (ind_doc_line1 < dst_met_ind$first_gnrh[1])
+        (ind_doc_line1 <= dst_met_ind$first_gnrh[1])
       ){
         
         # Set such docetaxel to line NA
@@ -349,78 +354,91 @@ line_df <- ldply(m1crpc_df_s, .progress = "text", .id=NULL, function(ind){
   }, error=function(e, ind_df){data.frame(error_message=as.character(e))})
 })
 
+# Patient with cessation without preceding initiation are excluded - not meaningful to try to fix those. 
 ers <- unique(line_df$lpnr[line_df$erase])
 line_df <- line_df[!line_df$erase,]
+line_df %<>% arrange(lpnr, line, event_dat)
 
-# line_df2 <- line_df[! line_df$drug_name %in% "Other CT",]
-# sort(table(line_df2$lpnr),decreasing = TRUE)[1:10]
-line_df %<>% arrange(lpnr, line_start, line)
-
-if(all(is.na(line_df$error_message))){
-  line_df %<>% select(-error_message)
-} else {
-  lpnr_with_errors <- line_df$lpnr[which(!is.na(line_df$error_message))]
-  stop("Errors found in line calculation")
-}
-
-### Quality Control ----------------------------------------  
-# As there was no line key, we make all quality checks I could think of:
+# This is for debugging. While running on INCA I would prefer a running script before a script that breaks down at the first error.
+# if(all(is.na(line_df$error_message))){
+#   line_df %<>% select(-error_message)
+# } else {
+#   lpnr_with_errors <- line_df$lpnr[which(!is.na(line_df$error_message))]
+#   stop("Errors found in line calculation")
+# }
 
 line_df$event_dat <- as.character(line_df$event_dat)
 line_df$death_dat <- as.character(line_df$death_dat)
 
+# Put back all non-CRPC drugs (bika, GnRH and so on)
 line_df <- bind_rows(line_df, other_drugs_df)
 line_df[line_df$drug_name %in% other_CT, "drug_name"] = "Other CT"
-line_df <- merge(line_df, dst_pers, by="lpnr", all.x=T)
 
 # Remove demo-patients and NA-rows
+line_df <- merge(line_df, dst_pers, by="lpnr", all.x=T)
 line_df <- line_df[substr(line_df$PERSNR, 0, 2)  %in% c("19","20"),]
-line_df <- line_df[!is.na(line_df),]
-
-# Compare line_df (new) to dst_drug (old)
-new <- line_df %>% filter(lpnr %in% dst_drug$lpnr) %>% distinct(lpnr, drug_name, line) %>% select(-lpnr) %>%  table()
-new <- as.data.frame.matrix(new[rowSums(new)!=0,])
-
-load("Z:/Uppsala/oc2foya/ppc/temp/PPC_dst_drug_20190808.rdata")
-dst_drug$drug_name <- tolower(dst_drug$drug_name)
-docetaxel_line_0 <- dst_drug %>% filter(drug_name == "docetaxel" & is.na(drug_line_crpc)) %>% distinct(lpnr) %>% nrow()
-dst_drug[dst_drug$drug_name %in% other_CT, "drug_name"] = "Other CT"
-old <- dst_drug %>% filter(drug_name %in% c("other ct", "ra223", unique(line_df$drug_name))) %>%  distinct(lpnr, drug_name, drug_line_crpc) %>% select(-lpnr) %>%  table()
-old <- as.data.frame.matrix(old[rowSums(old)!=0,])
-old <- old[rownames(old) %in% c(rownames(new),"ra223","other ct"),]
-old <- cbind("0"=c(0,docetaxel_line_0, rep(0,4)), old)
-
-new
-old
-new[,2:8] - old[,2:8]
-sum(new[,2:8] - old[,2:8])
-
-
-# Confusing that more patients have docetaxel in first line in new script. Check manually:
-new_abi_1 <- line_df %>% filter(line==1 & drug_name %in% "docetaxel") %>% select(lpnr) %>% distinct(lpnr)
-old_abi_1 <- dst_drug %>% filter(drug_line_crpc==1 & drug_name == "docetaxel") %>% select(lpnr) %>% distinct()
-new_abi_1[!new_abi_1$lpnr %in% old_abi_1$lpnr,]
-
-# Korrigeringar:
-# Metastaser fr?n DIAG togs inte bort n?r de intr?ffade efter GnRH, f?r det stod dst_base p? tv? st?llen
-# d?r ett av dem skulle varit diag.
-
-# Det g?r inte att bara anv?nda ett f?rsta metastasdatum, eftersom det kan vara 2005,
-# och sen kommer en ny metastas 2015, ett halv?r innan docetaxel. 
-# Anv?nder d?rf?r alla metastasdatum som f?reg?r GnRH f?r att avg?ra om docetaxel givits mot metastasen ist f?r crpc.
-# MEN f?rekomst av metastaser efter GnRH-start och f?re docetaxel g?r ju ?terigen att docetaxel ska vara crpc. 
-
-dst_drug$drug_line_crpc[dst_drug$lpnr==lpnr & dst_drug$drug_name=="docetaxel"] # drug_line_crpc=NA 
-line_df %>%  filter(lpnr==ind_lpnr) %>%  filter(drug_name=="docetaxel") # line = 1. 
-
-# drug_df <- line_df %>% select(-.id, -firstmet_all, -other_CT_false_line, -other_CT)
-
-# GnRH fr?n 2011-06
-gnrh_df[gnrh_df$lpnr==lpnr,]
-# metastaser f?re (2011-06) och m?nga efter GnRH (2012-10)
-dst_met[dst_met$lpnr==lpnr,]
-# startar docetaxel 2013-02
-line_df$line_start[line_df$lpnr %in% lpnr & line_df$drug_name=="docetaxel"][1]
+line_df <- line_df[!is.na(line_df$lpnr),]
 
 ## Save ----------------
+
+colnames(line_df)
+drug_df <- line_df %>% select(-.id, -erase, -other_CT_false_line, -other_CT, -PERSNR)
 save(drug_df, file="D:/Rskript/Uppsala/oc2foya/PPC/temp/drug_df.Rdata")
+
+############################################# 
+# Compare line_df (new) to dst_drug (old)
+#############################################
+# new <- line_df %>% filter(lpnr %in% dst_drug$lpnr) %>% distinct(lpnr, drug_name, line) %>% select(-lpnr) %>%  table()
+# new <- as.data.frame.matrix(new[rowSums(new)!=0,])
+# 
+# dat <- gsub("-","",Sys.Date())
+# load(paste0("Z:/Uppsala/oc2foya/ppc/temp/PPC_dst_drug_",dat,".rdata"))
+# dst_drug$drug_name <- tolower(dst_drug$drug_name)
+# docetaxel_line_0 <- dst_drug %>% filter(drug_name == "docetaxel" & is.na(drug_line_crpc)) %>% distinct(lpnr) %>% nrow()
+# dst_drug[dst_drug$drug_name %in% other_CT, "drug_name"] = "Other CT"
+# old <- dst_drug %>% filter(drug_name %in% c("other ct", "ra223", unique(line_df$drug_name))) %>%  distinct(lpnr, drug_name, drug_line_crpc) %>% select(-lpnr) %>%  table()
+# old <- as.data.frame.matrix(old[rowSums(old)!=0,])
+# old <- old[rownames(old) %in% c(rownames(new),"ra223","other ct"),]
+# old <- cbind("0"=c(0,docetaxel_line_0, rep(0,4)), old)
+# 
+# new
+# old
+# new[,2:8] - old[,2:8]
+# # Sv?rt att definiera vad som ?r "en" ?ndring. Om f?rsta linjen ?ndras f?r n?gon med tre linjer => ?ndring p? fyra platser i tabellen.
+# 
+# 
+# # Confusing that more patients have docetaxel in first line in new script. Check manually:
+# new_abi_1 <- line_df %>% filter(line==1 & drug_name %in% "docetaxel") %>% select(lpnr) %>% distinct(lpnr)
+# old_abi_1 <- dst_drug %>% filter(drug_line_crpc==1 & drug_name == "docetaxel") %>% select(lpnr) %>% distinct()
+# check_these <- new_abi_1[!new_abi_1$lpnr %in% old_abi_1$lpnr,]
+# 
+# check_df <- data.frame("lpnr"=check_these)
+# check_df$cause = NA
+# 
+# # ind_lpnr = XXXX
+# dst_drug[dst_drug$lpnr %in% ind_lpnr & dst_drug$drug_name %in% "docetaxel","drug_line_crpc"]
+# line_df[line_df$lpnr %in% ind_lpnr & line_df$drug_name %in% "docetaxel","line"]
+# 
+# for(i in 1:nrow(check_df)){
+#   # i = 98
+# 
+#   # 221 out of 297 had intermittent metastases. 
+#   ind_lpnr=check_df$lpnr[i]
+#   (gnrh_dat <- min(gnrh_df[gnrh_df$lpnr==ind_lpnr,]$first_gnrh, na.rm=T))
+#   (dst_met_ind <- dst_met[dst_met$lpnr==ind_lpnr,])
+#   (doc_dat <- line_df[line_df$lpnr %in% ind_lpnr & line_df$drug_name %in% "docetaxel", "line_start"])
+#   
+#   if(any((min(gnrh_dat) < dst_met_ind$met_dat) & (dst_met_ind$met_dat < min(doc_dat)))){
+#     check_df$cause[i] <- "int_met"
+#   }
+#   
+#   # Check if line has been splitted compared to dst_drug. 64 out of those not above (297-221) had splitted lines.
+#   if(is.na(check_df$cause[i]) & length(dst_drug[dst_drug$lpnr %in% ind_lpnr & dst_drug$drug_name %in% "docetaxel","drug_line_crpc"]) < 
+#      length(line_df[line_df$lpnr %in% ind_lpnr & line_df$drug_name %in% "docetaxel","line"])){
+#     check_df$cause[i] = "splitted line"
+#   }
+# }
+# 
+# # 7 lpnr do not fall into these two categories. We leave them as they are. 
+# check_df[is.na(check_df$cause),"lpnr"]
+# table(check_df$cause)
