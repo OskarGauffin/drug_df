@@ -170,25 +170,18 @@ m1crpc_df$death_dat <- as.Date(m1crpc_df$death_dat)
 m1crpc_df$event_dat <- as.Date(m1crpc_df$event_dat)
 m1crpc_df_s <- split(m1crpc_df, factor(m1crpc_df$lpnr))
 
-# For debugging
-# ind <- split(m1crpc_df, factor(m1crpc_df$lpnr!=lpnr))[[1]]
-
-# Marcus comment
-# lpnr 556333, 427294
-# for(i in 1:length(m1crpc_df_s)){if(any(m1crpc_df_s[[i]]$lpnr %in% "788801") ) break}
-# bogus <- c(459055,165746,580226,16842,264227,88704,911162,556333,427294)
-
 line_df <- ldply(m1crpc_df_s, .progress = "text", .id=NULL, function(ind){
   
   # tryCatch stores the error messages, and makes ldply run through all records.
   tryCatch({
-    # ind <- m1crpc_df_s
+    # ind <- m1crpc_df_s[[i]]
     ind$erase <- FALSE
+    ind$error_message <- NA
     
     drug_ind <- split(ind, with(ind, factor(paste(lpnr, drug_name))))
     
     ldply(drug_ind, function(x){
-      # x <- drug_ind[[2]]
+      # x <- drug_ind[[1]]
       
       #########
       # Correct a few incorrectly entered Xofigo-treatments with uts?ttning instead of paus. 
@@ -197,11 +190,11 @@ line_df <- ldply(m1crpc_df_s, .progress = "text", .id=NULL, function(ind){
       # This rule of thumb is from Ingela, as it's not likely that patients have more than two 
       # lines of Xofigo.
       #########
-      if(x$drug_name[1] %in% "radium(Ra-223)diklorid" & sum(x$event == "Uts?ttning")>2) {
+      if(x$drug_name[1] %in% "radium(Ra-223)diklorid" & sum(x$event %in% c("Uts?ttning","Utsättning"))>2) {
         
         x %<>% arrange(event_dat)
-        if(all(diff.Date(x$event_dat[x$event=="Uts?ttning"])<60)){
-          x$event[x$event=="Uts?ttning"][-which.max(x$event_dat[x$event=="Uts?ttning"])] = "Paus"
+        if(all(diff.Date(x$event_dat[x$event %in% c("Uts?ttning","Utsättning")])<60)){
+          x$event[x$event %in% c("Uts?ttning","Utsättning")][-which.max(x$event_dat[x$event %in% c("Uts?ttning","Utsättning")])] = "Paus"
         }
       }
       
@@ -224,7 +217,7 @@ line_df <- ldply(m1crpc_df_s, .progress = "text", .id=NULL, function(ind){
       #########
       
       x %<>% arrange(event_dat) %>% mutate(swap_index=NA)
-      swap_these <- str_locate(paste0(as.numeric(x$event == "Uts?ttning"), collapse=""), "11")[1]
+      swap_these <- str_locate(paste0(as.numeric(x$event %in% c("Uts?ttning","Utsättning")), collapse=""), "11")[1]
       x$swap_index[swap_these] = swap_these
       x %<>% arrange(event_dat, swap_index, event)
       
@@ -238,13 +231,13 @@ line_df <- ldply(m1crpc_df_s, .progress = "text", .id=NULL, function(ind){
       
       # If there is "Uts?ttning" without prior "Ins?ttning" then erase the whole person (i.e. all drug data)
       # Only look at if first uts?ttning is also first row in x
-      if(sum(x$event %in% "Uts?ttning")>0){
-        indx <- min(which(x$event %in% "Uts?ttning"))
+      if(sum(x$event %in% c("Uts?ttning","Utsättning"))>0){
+        indx <- min(which(x$event %in% c("Uts?ttning","Utsättning")))
         if(indx==1){x$erase <- TRUE}
         
       }
       
-      x$line_count[which(x$event[-nrow(x)] %in% "Uts?ttning") + 1] = 1
+      x$line_count[which(x$event[-nrow(x)] %in% c("Uts?ttning","Utsättning")) + 1] = 1
       
       return(x)
     }, .id=NULL) -> ind_df
@@ -252,8 +245,20 @@ line_df <- ldply(m1crpc_df_s, .progress = "text", .id=NULL, function(ind){
     ind_df$split_ind = NA
     ind_df$split_ind <- cumsum(ind_df$line_count)
     
-    # Now the grouping of lines are found, but not the order of the lines. For this, we define "line_start" as the first date in each line.
-    ind_df %<>% group_by(split_ind) %>% mutate(line_start = min(event_dat)) %>% ungroup()
+    
+    # find dates that are not "utsättning"
+    ind_df$index <- 1:nrow(ind_df)
+    ind_df2 <- ind_df[ ! ind_df$event %in% c("Uts?ttning","Utsättning"), ]
+    
+    # Now the grouping of lines are found, but not the order of the lines. For this, we define "line_start" as the first date in each line, excluding "utsättning".
+    ind_df2 %<>% group_by(split_ind) %>% mutate(line_start = min(event_dat))  %>% ungroup()
+    ind_df2 <- ind_df2[,c("index","line_start")]
+    ind_df <- merge(ind_df,ind_df2,by="index",all.x=TRUE)
+    
+    ind_df %<>% group_by(split_ind) %>% mutate(line_start = min(line_start,na.rm = TRUE))  %>% ungroup()
+    
+    # erase if line_start is missing
+    if(sum(is.na(ind_df$line_start))>0 ){ ind_df$erase = TRUE }
     
     # Now, order the lines according to the line_start and calculate the line with cumsum. 
     ind_df %<>% arrange(line_start, drug_name, event_dat, swap_index, event) %>% select(lpnr, everything(), -swap_index) %>% as.data.frame()
@@ -277,7 +282,7 @@ line_df <- ldply(m1crpc_df_s, .progress = "text", .id=NULL, function(ind){
     
     # Clean up
     ind_df %<>% select(-split_ind, -line_count)
-    ind_df$error_message=NA
+    # ind_df$error_message=NA
     
     ### Adjust first line docetaxel to NA, if initiated within nine month of pre-gnrh-metastasis (NPCR or PPC) 
     ### and abscence of metastases from GnRH-initiation to docetaxel-start, and docetaxel-start after gnrh-start.
@@ -301,7 +306,7 @@ line_df <- ldply(m1crpc_df_s, .progress = "text", .id=NULL, function(ind){
         (dst_met_ind$first_gnrh[1]  < ind_doc_line1 | all(is.na(dst_met_ind$first_gnrh))) |
         
         # or if docetaxel is initiated before gnrh - then it's certainly not crpc.
-        (ind_doc_line1 <= dst_met_ind$first_gnrh[1])
+        (ind_doc_line1 <= min(c(dst_met_ind$first_gnrh[1])) )
       ){
         
         # Set such docetaxel to line NA
@@ -324,9 +329,9 @@ line_df <- ldply(m1crpc_df_s, .progress = "text", .id=NULL, function(ind){
       # x <- x_list
       
       # If there is a cessation or death:
-      if(sum(x$event %in% "Uts?ttning" | !is.na(x$death_dat)) > 0){
+      if(sum(x$event %in% c("Uts?ttning","Utsättning") | !is.na(x$death_dat)) > 0){
         
-        yy <- c(x$event_dat[x$event %in% "Uts?ttning"], x$death_dat)
+        yy <- c(x$event_dat[x$event %in% c("Uts?ttning","Utsättning")], x$death_dat)
         
         # Cessation might be without date. Check if cessation date and death dates are all NA. 
         # In that case, set censoring = T at current date.
@@ -353,6 +358,18 @@ line_df <- ldply(m1crpc_df_s, .progress = "text", .id=NULL, function(ind){
     ind_df
   }, error=function(e, ind_df){data.frame(error_message=as.character(e))})
 })
+
+# unique(m1crpc_df$lpnr[!m1crpc_df$lpnr %in% line_df$lpnr])
+table(line_df$erase,useNA = "always")
+
+# Patient with cessation without preceding initiation are excluded - not meaningful to try to fix those. 
+ers <- unique(line_df$lpnr[line_df$erase])
+if(sum(is.na(ers))>0){print("Some missing lpnr!");print(sum(is.na(ers)))}
+
+line_df <- line_df[!line_df$erase,]
+
+# Remove NA-rows (ok since these have not correct data)
+line_df <- line_df[!is.na(line_df$lpnr),]
 
 # Patient with cessation without preceding initiation are excluded - not meaningful to try to fix those. 
 ers <- unique(line_df$lpnr[line_df$erase])
